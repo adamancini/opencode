@@ -24,7 +24,7 @@ import { EventV2 } from "@/v2/event"
 import { SessionEvent } from "@/v2/session-event"
 import { Modelv2 } from "@/v2/model"
 import * as DateTime from "effect/DateTime"
-import type { LLMEvent } from "@opencode-ai/llm"
+import { LLMEvent } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -289,385 +289,385 @@ export const layer: Layer.Layer<
 
       const toolInput = (value: unknown): Record<string, any> => (isRecord(value) ? value : { value })
 
-      const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
-        switch (value.type) {
-          case "request-start":
-            yield* status.set(ctx.sessionID, { type: "busy" })
-            return
+      const handleEvent = (value: StreamEvent) =>
+        LLMEvent.match(value, {
+          "request-start": () => status.set(ctx.sessionID, { type: "busy" }),
 
-          case "reasoning-start":
-            if (value.id in ctx.reasoningMap) return
-            // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-            EventV2.run(SessionEvent.Reasoning.Started.Sync, {
-              sessionID: ctx.sessionID,
-              reasoningID: value.id,
-              timestamp: DateTime.makeUnsafe(Date.now()),
-            })
-            ctx.reasoningMap[value.id] = {
-              id: PartID.ascending(),
-              messageID: ctx.assistantMessage.id,
-              sessionID: ctx.assistantMessage.sessionID,
-              type: "reasoning",
-              text: "",
-              time: { start: Date.now() },
-              metadata: value.providerMetadata,
-            }
-            yield* session.updatePart(ctx.reasoningMap[value.id])
-            return
-
-          case "reasoning-delta": {
-            const reasoningID = value.id ?? "reasoning"
-            if (!(reasoningID in ctx.reasoningMap)) {
+          "reasoning-start": (value) =>
+            Effect.gen(function* () {
+              if (value.id in ctx.reasoningMap) return
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               EventV2.run(SessionEvent.Reasoning.Started.Sync, {
                 sessionID: ctx.sessionID,
-                reasoningID,
+                reasoningID: value.id,
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
-              ctx.reasoningMap[reasoningID] = {
+              ctx.reasoningMap[value.id] = {
                 id: PartID.ascending(),
                 messageID: ctx.assistantMessage.id,
                 sessionID: ctx.assistantMessage.sessionID,
                 type: "reasoning",
                 text: "",
                 time: { start: Date.now() },
+                metadata: value.providerMetadata,
               }
-              yield* session.updatePart(ctx.reasoningMap[reasoningID])
-            }
-            ctx.reasoningMap[reasoningID].text += value.text
-            yield* session.updatePartDelta({
-              sessionID: ctx.reasoningMap[reasoningID].sessionID,
-              messageID: ctx.reasoningMap[reasoningID].messageID,
-              partID: ctx.reasoningMap[reasoningID].id,
-              field: "text",
-              delta: value.text,
-            })
-            return
-          }
+              yield* session.updatePart(ctx.reasoningMap[value.id])
+            }),
 
-          case "reasoning-end":
-            if (value.providerMetadata && value.id in ctx.reasoningMap) {
-              ctx.reasoningMap[value.id].metadata = value.providerMetadata
-            }
-            yield* finishReasoning(value.id)
-            return
+          "reasoning-delta": (value) =>
+            Effect.gen(function* () {
+              if (!(value.id in ctx.reasoningMap)) {
+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+                EventV2.run(SessionEvent.Reasoning.Started.Sync, {
+                  sessionID: ctx.sessionID,
+                  reasoningID: value.id,
+                  timestamp: DateTime.makeUnsafe(Date.now()),
+                })
+                ctx.reasoningMap[value.id] = {
+                  id: PartID.ascending(),
+                  messageID: ctx.assistantMessage.id,
+                  sessionID: ctx.assistantMessage.sessionID,
+                  type: "reasoning",
+                  text: "",
+                  time: { start: Date.now() },
+                }
+                yield* session.updatePart(ctx.reasoningMap[value.id])
+              }
+              ctx.reasoningMap[value.id].text += value.text
+              yield* session.updatePartDelta({
+                sessionID: ctx.reasoningMap[value.id].sessionID,
+                messageID: ctx.reasoningMap[value.id].messageID,
+                partID: ctx.reasoningMap[value.id].id,
+                field: "text",
+                delta: value.text,
+              })
+            }),
 
-          case "tool-input-start":
-            if (ctx.assistantMessage.summary) {
-              throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
-            }
-            yield* ensureToolCall(value)
-            return
+          "reasoning-end": (value) =>
+            Effect.gen(function* () {
+              if (value.providerMetadata && value.id in ctx.reasoningMap) {
+                ctx.reasoningMap[value.id].metadata = value.providerMetadata
+              }
+              yield* finishReasoning(value.id)
+            }),
 
-          case "tool-input-delta": {
-            if (ctx.assistantMessage.summary) {
-              throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
-            }
-            yield* ensureToolCall(value)
-            if (value.text) {
-              yield* updateToolCall(value.id, (match) => ({
-                ...match,
-                state:
-                  match.state.status === "pending"
-                    ? { ...match.state, raw: match.state.raw + value.text }
-                    : match.state,
-              }))
-            }
-            return
-          }
+          "tool-input-start": (value) =>
+            Effect.gen(function* () {
+              if (ctx.assistantMessage.summary) {
+                return yield* Effect.fail(new Error(`Tool call not allowed while generating summary: ${value.name}`))
+              }
+              yield* ensureToolCall(value)
+            }),
 
-          case "tool-input-end": {
-            const toolCall = yield* ensureToolCall(value)
-            // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-            EventV2.run(SessionEvent.Tool.Input.Ended.Sync, {
-              sessionID: ctx.sessionID,
-              callID: value.id,
-              text: toolCall.part.state.status === "pending" ? toolCall.part.state.raw : "",
-              timestamp: DateTime.makeUnsafe(Date.now()),
-            })
-            ctx.toolcalls[value.id] = { ...toolCall.call, inputEnded: true }
-            return
-          }
+          "tool-input-delta": (value) =>
+            Effect.gen(function* () {
+              if (ctx.assistantMessage.summary) {
+                return yield* Effect.fail(new Error(`Tool call not allowed while generating summary: ${value.name}`))
+              }
+              yield* ensureToolCall(value)
+              if (value.text) {
+                yield* updateToolCall(value.id, (match) => ({
+                  ...match,
+                  state:
+                    match.state.status === "pending"
+                      ? { ...match.state, raw: match.state.raw + value.text }
+                      : match.state,
+                }))
+              }
+            }),
 
-          case "tool-call": {
-            if (ctx.assistantMessage.summary) {
-              throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
-            }
-            const toolCall = yield* ensureToolCall(value)
-            const input = toolInput(value.input)
-            const raw = toolCall.part.state.status === "pending" ? toolCall.part.state.raw : ""
-            if (!toolCall.call.inputEnded) {
+          "tool-input-end": (value) =>
+            Effect.gen(function* () {
+              const toolCall = yield* ensureToolCall(value)
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               EventV2.run(SessionEvent.Tool.Input.Ended.Sync, {
                 sessionID: ctx.sessionID,
                 callID: value.id,
-                text: raw,
+                text: toolCall.part.state.status === "pending" ? toolCall.part.state.raw : "",
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
-            }
-            // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-            EventV2.run(SessionEvent.Tool.Called.Sync, {
-              sessionID: ctx.sessionID,
-              callID: value.id,
-              tool: value.name,
-              input,
-              provider: {
-                executed: toolCall.part.metadata?.providerExecuted === true,
-                ...(value.providerMetadata ? { metadata: value.providerMetadata } : {}),
-              },
-              timestamp: DateTime.makeUnsafe(Date.now()),
-            })
-            yield* updateToolCall(value.id, (match) => ({
-              ...match,
-              tool: value.name,
-              state:
-                match.state.status === "running"
-                  ? { ...match.state, input }
-                  : {
-                      status: "running",
-                      input,
-                      time: { start: Date.now() },
-                    },
-              metadata: {
-                ...match.metadata,
-                ...value.providerMetadata,
-                ...(match.metadata?.providerExecuted ? { providerExecuted: true } : {}),
-              },
-            }))
+              ctx.toolcalls[value.id] = { ...toolCall.call, inputEnded: true }
+            }),
 
-            const parts = MessageV2.parts(ctx.assistantMessage.id)
-            const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
-
-            if (
-              recentParts.length !== DOOM_LOOP_THRESHOLD ||
-              !recentParts.every(
-                (part) =>
-                  part.type === "tool" &&
-                  part.tool === value.name &&
-                  part.state.status !== "pending" &&
-                  JSON.stringify(part.state.input) === JSON.stringify(input),
-              )
-            ) {
-              return
-            }
-
-            const agent = yield* agents.get(ctx.assistantMessage.agent)
-            yield* permission.ask({
-              permission: "doom_loop",
-              patterns: [value.name],
-              sessionID: ctx.assistantMessage.sessionID,
-              metadata: { tool: value.name, input },
-              always: [value.name],
-              ruleset: agent.permission,
-            })
-            return
-          }
-
-          case "tool-result": {
-            const toolCall = yield* readToolCall(value.id)
-            const output = toolResultOutput(value)
-            // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-            EventV2.run(SessionEvent.Tool.Success.Sync, {
-              sessionID: ctx.sessionID,
-              callID: value.id,
-              structured: output.metadata,
-              content: [
-                {
-                  type: "text",
-                  text: output.output,
-                },
-                ...(output.attachments?.map((item: MessageV2.FilePart) => ({
-                  type: "file" as const,
-                  uri: item.url,
-                  mime: item.mime,
-                  name: item.filename,
-                })) ?? []),
-              ],
-              provider: {
-                executed: value.providerExecuted === true || toolCall?.part.metadata?.providerExecuted === true,
-              },
-              timestamp: DateTime.makeUnsafe(Date.now()),
-            })
-            yield* completeToolCall(value.id, output)
-            return
-          }
-
-          case "tool-error": {
-            const toolCall = yield* readToolCall(value.id)
-            // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-            EventV2.run(SessionEvent.Tool.Failed.Sync, {
-              sessionID: ctx.sessionID,
-              callID: value.id,
-              error: {
-                type: "unknown",
-                message: value.message,
-              },
-              provider: {
-                executed: toolCall?.part.metadata?.providerExecuted === true,
-              },
-              timestamp: DateTime.makeUnsafe(Date.now()),
-            })
-            yield* failToolCall(value.id, new Error(value.message))
-            return
-          }
-
-          case "provider-error":
-            throw new Error(value.message)
-
-          case "step-start":
-            if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
-            if (!ctx.assistantMessage.summary) {
-              // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-              EventV2.run(SessionEvent.Step.Started.Sync, {
-                sessionID: ctx.sessionID,
-                agent: input.assistantMessage.agent,
-                model: {
-                  id: Modelv2.ID.make(ctx.model.id),
-                  providerID: Modelv2.ProviderID.make(ctx.model.providerID),
-                  variant: Modelv2.VariantID.make(input.assistantMessage.variant ?? "default"),
-                },
-                snapshot: ctx.snapshot,
-                timestamp: DateTime.makeUnsafe(Date.now()),
-              })
-            }
-            yield* session.updatePart({
-              id: PartID.ascending(),
-              messageID: ctx.assistantMessage.id,
-              sessionID: ctx.sessionID,
-              snapshot: ctx.snapshot,
-              type: "step-start",
-            })
-            return
-
-          case "step-finish": {
-            const completedSnapshot = yield* snapshot.track()
-            yield* Effect.forEach(Object.keys(ctx.reasoningMap), finishReasoning)
-            const usage = Session.getUsage({
-              model: ctx.model,
-              usage: value.usage ?? {},
-              metadata: value.providerMetadata,
-            })
-            if (!ctx.assistantMessage.summary) {
-              // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-              EventV2.run(SessionEvent.Step.Ended.Sync, {
-                sessionID: ctx.sessionID,
-                finish: value.reason,
-                cost: usage.cost,
-                tokens: usage.tokens,
-                snapshot: completedSnapshot,
-                timestamp: DateTime.makeUnsafe(Date.now()),
-              })
-            }
-            ctx.assistantMessage.finish = value.reason
-            ctx.assistantMessage.cost += usage.cost
-            ctx.assistantMessage.tokens = usage.tokens
-            yield* session.updatePart({
-              id: PartID.ascending(),
-              reason: value.reason,
-              snapshot: completedSnapshot,
-              messageID: ctx.assistantMessage.id,
-              sessionID: ctx.assistantMessage.sessionID,
-              type: "step-finish",
-              tokens: usage.tokens,
-              cost: usage.cost,
-            })
-            yield* session.updateMessage(ctx.assistantMessage)
-            if (ctx.snapshot) {
-              const patch = yield* snapshot.patch(ctx.snapshot)
-              if (patch.files.length) {
-                yield* session.updatePart({
-                  id: PartID.ascending(),
-                  messageID: ctx.assistantMessage.id,
+          "tool-call": (value) =>
+            Effect.gen(function* () {
+              if (ctx.assistantMessage.summary) {
+                return yield* Effect.fail(new Error(`Tool call not allowed while generating summary: ${value.name}`))
+              }
+              const toolCall = yield* ensureToolCall(value)
+              const input = toolInput(value.input)
+              const raw = toolCall.part.state.status === "pending" ? toolCall.part.state.raw : ""
+              if (!toolCall.call.inputEnded) {
+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+                EventV2.run(SessionEvent.Tool.Input.Ended.Sync, {
                   sessionID: ctx.sessionID,
-                  type: "patch",
-                  hash: patch.hash,
-                  files: patch.files,
+                  callID: value.id,
+                  text: raw,
+                  timestamp: DateTime.makeUnsafe(Date.now()),
                 })
               }
-              ctx.snapshot = undefined
-            }
-            yield* summary
-              .summarize({
-                sessionID: ctx.sessionID,
-                messageID: ctx.assistantMessage.parentID,
-              })
-              .pipe(Effect.ignore, Effect.forkIn(scope))
-            if (
-              !ctx.assistantMessage.summary &&
-              isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
-            ) {
-              ctx.needsCompaction = true
-            }
-            return
-          }
-
-          case "text-start":
-            if (!ctx.assistantMessage.summary) {
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-              EventV2.run(SessionEvent.Text.Started.Sync, {
+              EventV2.run(SessionEvent.Tool.Called.Sync, {
                 sessionID: ctx.sessionID,
+                callID: value.id,
+                tool: value.name,
+                input,
+                provider: {
+                  executed: toolCall.part.metadata?.providerExecuted === true,
+                  ...(value.providerMetadata ? { metadata: value.providerMetadata } : {}),
+                },
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
-            }
-            ctx.currentText = {
-              id: PartID.ascending(),
-              messageID: ctx.assistantMessage.id,
-              sessionID: ctx.assistantMessage.sessionID,
-              type: "text",
-              text: "",
-              time: { start: Date.now() },
-              metadata: value.providerMetadata,
-            }
-            yield* session.updatePart(ctx.currentText)
-            return
+              yield* updateToolCall(value.id, (match) => ({
+                ...match,
+                tool: value.name,
+                state:
+                  match.state.status === "running"
+                    ? { ...match.state, input }
+                    : {
+                        status: "running",
+                        input,
+                        time: { start: Date.now() },
+                      },
+                metadata: {
+                  ...match.metadata,
+                  ...value.providerMetadata,
+                  ...(match.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                },
+              }))
 
-          case "text-delta":
-            if (!ctx.currentText) return
-            ctx.currentText.text += value.text
-            yield* session.updatePartDelta({
-              sessionID: ctx.currentText.sessionID,
-              messageID: ctx.currentText.messageID,
-              partID: ctx.currentText.id,
-              field: "text",
-              delta: value.text,
-            })
-            return
+              const parts = MessageV2.parts(ctx.assistantMessage.id)
+              const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
 
-          case "text-end":
-            if (!ctx.currentText) return
-            // oxlint-disable-next-line no-self-assign -- reactivity trigger
-            ctx.currentText.text = ctx.currentText.text
-            ctx.currentText.text = (yield* plugin.trigger(
-              "experimental.text.complete",
-              {
+              if (
+                recentParts.length !== DOOM_LOOP_THRESHOLD ||
+                !recentParts.every(
+                  (part) =>
+                    part.type === "tool" &&
+                    part.tool === value.name &&
+                    part.state.status !== "pending" &&
+                    JSON.stringify(part.state.input) === JSON.stringify(input),
+                )
+              ) {
+                return
+              }
+
+              const agent = yield* agents.get(ctx.assistantMessage.agent)
+              yield* permission.ask({
+                permission: "doom_loop",
+                patterns: [value.name],
+                sessionID: ctx.assistantMessage.sessionID,
+                metadata: { tool: value.name, input },
+                always: [value.name],
+                ruleset: agent.permission,
+              })
+            }),
+
+          "tool-result": (value) =>
+            Effect.gen(function* () {
+              const toolCall = yield* readToolCall(value.id)
+              const output = toolResultOutput(value)
+              // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+              EventV2.run(SessionEvent.Tool.Success.Sync, {
                 sessionID: ctx.sessionID,
+                callID: value.id,
+                structured: output.metadata,
+                content: [
+                  {
+                    type: "text",
+                    text: output.output,
+                  },
+                  ...(output.attachments?.map((item: MessageV2.FilePart) => ({
+                    type: "file" as const,
+                    uri: item.url,
+                    mime: item.mime,
+                    name: item.filename,
+                  })) ?? []),
+                ],
+                provider: {
+                  executed: value.providerExecuted === true || toolCall?.part.metadata?.providerExecuted === true,
+                },
+                timestamp: DateTime.makeUnsafe(Date.now()),
+              })
+              yield* completeToolCall(value.id, output)
+            }),
+
+          "tool-error": (value) =>
+            Effect.gen(function* () {
+              const toolCall = yield* readToolCall(value.id)
+              // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+              EventV2.run(SessionEvent.Tool.Failed.Sync, {
+                sessionID: ctx.sessionID,
+                callID: value.id,
+                error: {
+                  type: "unknown",
+                  message: value.message,
+                },
+                provider: {
+                  executed: toolCall?.part.metadata?.providerExecuted === true,
+                },
+                timestamp: DateTime.makeUnsafe(Date.now()),
+              })
+              yield* failToolCall(value.id, new Error(value.message))
+            }),
+
+          "provider-error": (value) => Effect.fail(new Error(value.message)),
+
+          "step-start": () =>
+            Effect.gen(function* () {
+              if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
+              if (!ctx.assistantMessage.summary) {
+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+                EventV2.run(SessionEvent.Step.Started.Sync, {
+                  sessionID: ctx.sessionID,
+                  agent: input.assistantMessage.agent,
+                  model: {
+                    id: Modelv2.ID.make(ctx.model.id),
+                    providerID: Modelv2.ProviderID.make(ctx.model.providerID),
+                    variant: Modelv2.VariantID.make(input.assistantMessage.variant ?? "default"),
+                  },
+                  snapshot: ctx.snapshot,
+                  timestamp: DateTime.makeUnsafe(Date.now()),
+                })
+              }
+              yield* session.updatePart({
+                id: PartID.ascending(),
                 messageID: ctx.assistantMessage.id,
-                partID: ctx.currentText.id,
-              },
-              { text: ctx.currentText.text },
-            )).text
-            if (!ctx.assistantMessage.summary) {
-              // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
-              EventV2.run(SessionEvent.Text.Ended.Sync, {
                 sessionID: ctx.sessionID,
-                text: ctx.currentText.text,
-                timestamp: DateTime.makeUnsafe(Date.now()),
+                snapshot: ctx.snapshot,
+                type: "step-start",
               })
-            }
-            {
-              const end = Date.now()
-              ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
-            }
-            if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
-            yield* session.updatePart(ctx.currentText)
-            ctx.currentText = undefined
-            return
+            }),
 
-          case "request-finish":
-            return
+          "step-finish": (value) =>
+            Effect.gen(function* () {
+              const completedSnapshot = yield* snapshot.track()
+              yield* Effect.forEach(Object.keys(ctx.reasoningMap), finishReasoning)
+              const usage = Session.getUsage({
+                model: ctx.model,
+                usage: value.usage ?? {},
+                metadata: value.providerMetadata,
+              })
+              if (!ctx.assistantMessage.summary) {
+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+                EventV2.run(SessionEvent.Step.Ended.Sync, {
+                  sessionID: ctx.sessionID,
+                  finish: value.reason,
+                  cost: usage.cost,
+                  tokens: usage.tokens,
+                  snapshot: completedSnapshot,
+                  timestamp: DateTime.makeUnsafe(Date.now()),
+                })
+              }
+              ctx.assistantMessage.finish = value.reason
+              ctx.assistantMessage.cost += usage.cost
+              ctx.assistantMessage.tokens = usage.tokens
+              yield* session.updatePart({
+                id: PartID.ascending(),
+                reason: value.reason,
+                snapshot: completedSnapshot,
+                messageID: ctx.assistantMessage.id,
+                sessionID: ctx.assistantMessage.sessionID,
+                type: "step-finish",
+                tokens: usage.tokens,
+                cost: usage.cost,
+              })
+              yield* session.updateMessage(ctx.assistantMessage)
+              if (ctx.snapshot) {
+                const patch = yield* snapshot.patch(ctx.snapshot)
+                if (patch.files.length) {
+                  yield* session.updatePart({
+                    id: PartID.ascending(),
+                    messageID: ctx.assistantMessage.id,
+                    sessionID: ctx.sessionID,
+                    type: "patch",
+                    hash: patch.hash,
+                    files: patch.files,
+                  })
+                }
+                ctx.snapshot = undefined
+              }
+              yield* summary
+                .summarize({
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.assistantMessage.parentID,
+                })
+                .pipe(Effect.ignore, Effect.forkIn(scope))
+              if (
+                !ctx.assistantMessage.summary &&
+                isOverflow({ cfg: yield* config.get(), tokens: usage.tokens, model: ctx.model })
+              ) {
+                ctx.needsCompaction = true
+              }
+            }),
 
-        }
-      })
+          "text-start": (value) =>
+            Effect.gen(function* () {
+              if (!ctx.assistantMessage.summary) {
+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+                EventV2.run(SessionEvent.Text.Started.Sync, {
+                  sessionID: ctx.sessionID,
+                  timestamp: DateTime.makeUnsafe(Date.now()),
+                })
+              }
+              ctx.currentText = {
+                id: PartID.ascending(),
+                messageID: ctx.assistantMessage.id,
+                sessionID: ctx.assistantMessage.sessionID,
+                type: "text",
+                text: "",
+                time: { start: Date.now() },
+                metadata: value.providerMetadata,
+              }
+              yield* session.updatePart(ctx.currentText)
+            }),
+
+          "text-delta": (value) =>
+            Effect.gen(function* () {
+              if (!ctx.currentText) return
+              ctx.currentText.text += value.text
+              yield* session.updatePartDelta({
+                sessionID: ctx.currentText.sessionID,
+                messageID: ctx.currentText.messageID,
+                partID: ctx.currentText.id,
+                field: "text",
+                delta: value.text,
+              })
+            }),
+
+          "text-end": (value) =>
+            Effect.gen(function* () {
+              if (!ctx.currentText) return
+              // oxlint-disable-next-line no-self-assign -- reactivity trigger
+              ctx.currentText.text = ctx.currentText.text
+              ctx.currentText.text = (yield* plugin.trigger(
+                "experimental.text.complete",
+                {
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                  partID: ctx.currentText.id,
+                },
+                { text: ctx.currentText.text },
+              )).text
+              if (!ctx.assistantMessage.summary) {
+                // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
+                EventV2.run(SessionEvent.Text.Ended.Sync, {
+                  sessionID: ctx.sessionID,
+                  text: ctx.currentText.text,
+                  timestamp: DateTime.makeUnsafe(Date.now()),
+                })
+              }
+              {
+                const end = Date.now()
+                ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
+              }
+              if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
+              yield* session.updatePart(ctx.currentText)
+              ctx.currentText = undefined
+            }),
+
+          "request-finish": () => Effect.void,
+        })
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
         if (ctx.snapshot) {
